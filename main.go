@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/ncruces/zenity"
@@ -31,11 +32,13 @@ func main() {
 		log.Fatal("Error getting task")
 	}
 
-	// make a backup
-	err = copy(taskFile, taskFileBackup)
-	if err != nil {
-		showError(fmt.Sprintf("Failed to make backup of '%s': %v", taskFile, err))
-		log.Fatalf("Failed to make backup of '%s': %v", taskFile, err)
+	if (taskFileBackup != "") && (taskFileBackup != taskFile) {
+		// make a backup
+		err = copy(taskFile, taskFileBackup)
+		if err != nil {
+			showError(fmt.Sprintf("Failed to make backup of '%s': %v", taskFile, err))
+			log.Fatalf("Failed to make backup of '%s': %v", taskFile, err)
+		}
 	}
 
 	f, err := os.Open(taskFile)
@@ -125,15 +128,15 @@ func showError(message string) {
 
 func loadConfig() (string, string) {
 	viper.SetConfigName("tasker")
-	viper.AddConfigPath("$XDG_CONFIG_HOME/tasker/")
-	viper.AddConfigPath("$LOCALAPPDATA/tasker/")
-	viper.AddConfigPath("$HOME/.tasker")
+	cfgPath := resolveConfigPath()
+
+	viper.AddConfigPath(cfgPath)
 
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
 			createConfig()
 		} else {
-			showError(fmt.Sprint("Error reading config file: %v", err))
+			showError(fmt.Sprintf("Error reading config file: %v", err))
 			log.Fatalf("Error reading config file: %v", err)
 		}
 	}
@@ -161,23 +164,73 @@ func createConfig() {
 		{Name: "Markdown files", Patterns: []string{"*.md"}, CaseFold: false},
 	})
 	if err != nil {
-		showError(fmt.Sprintf("Failed to select task file: %v", err))
+		showError(fmt.Sprintf("Failed to select task file:` %v", err))
 		log.Fatalf("failed to choose task file: %v", err)
 	}
 
 	viper.Set("taskfile", taskFile)
 
 	err = zenity.Question("Do you want to create a backup file when a task is added?")
-	createBackup := true
+	createBackup := err == nil
 
-	if err != nil {
-		createBackup = false
+	if createBackup {
+		viper.Set("backupfile", taskFile+".bak")
 	}
 
 	viper.SetConfigType("yaml")
+
+	cfgPath := resolveConfigPath()
+
+	log.Printf("determined config to use %s", cfgPath)
+
+	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+		log.Printf("creating folder %s", cfgPath)
+
+		err = os.MkdirAll(cfgPath, 0755)
+		if err != nil {
+			showError(fmt.Sprintf("Error creating config directory: %v", err))
+			log.Fatalf("Error creating config directory: %v", err)
+		}
+	} else if err != nil {
+		showError("could not stat config folder")
+		log.Fatalf("could not stat folder %v", err)
+	}
+
+	viper.AddConfigPath(cfgPath)
+
 	err = viper.SafeWriteConfig()
 	if err != nil {
 		showError(fmt.Sprintf("Error saving configuration file: %v", err))
 		log.Fatalf("failed to create configuration file: %v", err)
 	}
+}
+
+func resolveConfigPath() string {
+	cfgPath := viper.ConfigFileUsed()
+	log.Printf("config file used %v", cfgPath)
+	ok := false
+	if runtime.GOOS == "windows" {
+		if cfgPath, ok = resolvePath("LOCALAPPDATA", "\\tasker\\"); !ok {
+			if cfgPath, ok = resolvePath("HOME", "/.tasker/"); !ok {
+				showError("unable to determine correct config path")
+				log.Fatal("unable to determine config path, tried LOCALAPPDATA and HOME")
+			}
+		}
+	} else {
+		if cfgPath, ok = resolvePath("XDG_CONFIG_HOME", "/tasker/"); !ok {
+			if cfgPath, ok = resolvePath("HOME", "/.tasker/"); !ok {
+				showError("unabled to determine correct config path")
+				log.Fatal("unable to determine config path, tried XDG_CONFIG_HOME and HOME")
+			}
+		}
+	}
+
+	return cfgPath
+}
+
+func resolvePath(envVar string, dir string) (string, bool) {
+	if resolved, ok := os.LookupEnv(envVar); ok {
+		return resolved + dir, true
+	}
+	return "", false
 }
